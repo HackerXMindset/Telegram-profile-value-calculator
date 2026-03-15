@@ -1,7 +1,7 @@
 
 # tg-profile-valuator
 
-A Telegram bot that calculates the total value of any Telegram account — collectible usernames, unique gifts, floor prices, and historical TON data.
+A Telegram bot that calculates the total value of any Telegram account — collectible usernames, anonymous numbers, unique gifts and historical TON data.
 
 ---
 
