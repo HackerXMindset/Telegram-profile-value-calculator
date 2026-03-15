@@ -13,7 +13,7 @@ from telegram.ext import (
 from telethon import TelegramClient, functions
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 from telethon.tl.functions.fragment import GetCollectibleInfoRequest
-from telethon.tl.types import InputCollectibleUsername
+from telethon.tl.types import InputCollectibleUsername, InputCollectiblePhone
 import httpx
 
 load_dotenv()
@@ -155,6 +155,38 @@ async def fetch_username_price(username: str) -> dict | None:
     except Exception:
         return None
 
+async def fetch_phone_price(phone: str) -> dict | None:
+    try:
+        res = await client(GetCollectibleInfoRequest(
+            collectible=InputCollectiblePhone(phone=phone)
+        ))
+        ton           = res.crypto_amount / 1e9
+        purchase_date = res.purchase_date
+        return {
+            "phone":         phone,
+            "ton":           ton,
+            "usd_at_sale":   res.amount / 100,
+            "purchase_date": purchase_date,
+            "date_str":      purchase_date.strftime("%b %d, %Y") if purchase_date else "Unknown",
+        }
+    except Exception:
+        return None
+
+
+    gifts, offset = [], ""
+    try:
+        while True:
+            res = await client(functions.payments.GetSavedStarGiftsRequest(
+                peer=peer, offset=offset, limit=100
+            ))
+            gifts.extend(res.gifts)
+            if not res.next_offset:
+                break
+            offset = res.next_offset
+    except Exception as e:
+        logger.error(f"fetch_all_gifts: {e}")
+    return gifts
+
 async def fetch_all_gifts(peer) -> list:
     gifts, offset = [], ""
     try:
@@ -190,14 +222,14 @@ async def build_report(username: str):
     username = username.lstrip("@")
 
     if not await client.is_user_authorized():
-        return "❌ Userbot not logged in. Ask admin to login first.", None, back_kb()
+        return "❌ Userbot not logged in. Ask admin to login first.", None, None, None, back_kb()
 
     ton_now = await get_ton_price_now()
 
     try:
         entity = await client.get_entity(username)
     except Exception:
-        return f"❌ @{username} not found or private.", None, back_kb()
+        return f"❌ @{username} not found or private.", None, None, None, back_kb()
 
     # ── Usernames ─────────────────────────────────────────────────────────────
     unames = [username]
@@ -222,6 +254,20 @@ async def build_report(username: str):
     total_u_ton      = sum(r["ton"]      for r in u_results)
     total_u_usd_hist = sum(r["usd_hist"] for r in u_results)
     total_u_usd_now  = sum(r["usd_now"]  for r in u_results)
+
+    # ── Anonymous phone number ────────────────────────────────────────────────
+    phone_result = None
+    phone_str = getattr(entity, "phone", None)
+    if phone_str and phone_str.startswith("888"):
+        p = await fetch_phone_price(phone_str)
+        if p:
+            hist = await get_ton_price_on_date(p["purchase_date"]) if p["purchase_date"] else None
+            p["usd_hist"] = p["ton"] * hist if hist else p["usd_at_sale"]
+            p["usd_now"]  = p["ton"] * ton_now
+            phone_result  = p
+            total_u_ton      += p["ton"]
+            total_u_usd_hist += p["usd_hist"]
+            total_u_usd_now  += p["usd_now"]
 
     # ── Gifts ─────────────────────────────────────────────────────────────────
     peer  = await client.get_input_entity(username)
@@ -301,24 +347,29 @@ async def build_report(username: str):
 
     # ── Build messages (HTML) ─────────────────────────────────────────────────
 
-    # Message 1 — Usernames
+    # Message 1 — Usernames + phone
     u_lines = []
     u_lines.append(f"<b>👤 @{he(username)}</b>")
     u_lines.append("")
-    u_lines.append("<b>🔤 USERNAMES</b>")
-    if u_results:
+    u_lines.append("<b>🔤 USERNAMES &amp; NUMBERS</b>")
+    if u_results or phone_result:
         bq = []
         for r in u_results:
             bq.append(f"@{he(r['username'])}  ·  {r['ton']:.0f} TON")
             bq.append(f"  Bought for    ${r['usd_hist']:,.0f}  on {he(r['date_str'])}")
             bq.append(f"  Current value ${r['usd_now']:,.0f}")
             bq.append("")
+        if phone_result:
+            bq.append(f"+{he(phone_result['phone'])}  ·  {phone_result['ton']:.0f} TON")
+            bq.append(f"  Bought for    ${phone_result['usd_hist']:,.0f}  on {he(phone_result['date_str'])}")
+            bq.append(f"  Current value ${phone_result['usd_now']:,.0f}")
+            bq.append("")
         bq.append(f"Total  {total_u_ton:.0f} TON")
         bq.append(f"Bought for    ${total_u_usd_hist:,.0f}")
         bq.append(f"Current value ${total_u_usd_now:,.0f}")
         u_lines.append(f"<blockquote expandable>{chr(10).join(bq)}</blockquote>")
     else:
-        u_lines.append("  No collectible usernames")
+        u_lines.append("  No collectible usernames or numbers")
     msg_usernames = "\n".join(u_lines)
 
     # Message 2 — Collectible gifts
@@ -330,17 +381,15 @@ async def build_report(username: str):
         bq = []
         for c in coll_data:
             bq.append(f"{he(c['name'])} #{c['num']}")
-            if c["val_usd"]:
-                bq.append(f"  Price set by user  ${c['val_usd']:,.0f}")
             if c["floor_st"]:
-                bq.append(f"  Floor price        {c['floor_st']:,} ⭐  →  {c['floor_ton']:.2f} TON  ·  ${c['floor_usd']:,.0f}")
+                bq.append(f"  Floor price  {c['floor_st']:,} ⭐  →  {c['floor_ton']:.2f} TON  ·  ${c['floor_usd']:,.0f}")
             if c["last_st"]:
                 last_usd = (c["last_st"] / 227) * ton_now
                 ds = f"  ({c['last_date'].strftime('%b %d, %Y')})" if c["last_date"] else ""
-                bq.append(f"  Last sale          ${last_usd:,.0f}{ds}")
+                bq.append(f"  Last sale    ${last_usd:,.0f}{ds}")
             if c["resell"]:
                 r_usd = (c["resell"] / 227) * ton_now
-                bq.append(f"  🟢 Listed for      {c['resell']:,} ⭐  ·  ${r_usd:,.0f}")
+                bq.append(f"  🟢 Listed    {c['resell']:,} ⭐  ·  ${r_usd:,.0f}")
             bq.append("")
         if len(collectibles) > 25:
             bq.append(f"+ {len(collectibles) - 25} more not shown")
@@ -363,29 +412,38 @@ async def build_report(username: str):
         msg_regulars = "\n".join(r_lines)
 
     # Message 4 — Summary
-    total_by_value = total_u_usd_now + total_g_value_usd
     total_by_floor = total_u_usd_now + total_g_floor_usd
     total_ton_all  = total_u_ton     + total_g_floor_ton
 
-    summary = (
-        f"<b>📊 @{he(username)}  —  Value Summary</b>\n"
-        f"\n"
-        f"<b>🔤 Usernames</b>\n"
-        f"  Bought for    <b>${total_u_usd_hist:,.0f}</b>  ({total_u_ton:.0f} TON)\n"
-        f"  Current value <b>${total_u_usd_now:,.0f}</b>\n"
-        f"\n"
-        f"<b>🎁 Gifts  (value set by user)</b>\n"
-        f"  <b>${total_g_value_usd:,.0f}</b>\n"
-        f"\n"
-        f"<b>🎁 Gifts  (floor price)</b>\n"
-        f"  <b>{total_g_floor_ton:.1f} TON  ·  ${total_g_floor_usd:,.0f}</b>\n"
-        f"\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Total  (by value)   ${total_by_value:,.0f}</b>\n"
-        f"💰 <b>Total  (by floor)   {total_ton_all:.1f} TON  ·  ${total_by_floor:,.0f}</b>\n"
-        f"\n"
-        f"<i>1 TON = ${ton_now:.2f}</i>"
-    )
+    # Separate username totals from phone totals for summary
+    u_only_ton      = sum(r["ton"]      for r in u_results)
+    u_only_usd_hist = sum(r["usd_hist"] for r in u_results)
+    u_only_usd_now  = sum(r["usd_now"]  for r in u_results)
+
+    summary_parts = [f"<b>📊 @{he(username)}  —  Value Summary</b>\n"]
+
+    if u_results:
+        summary_parts.append(f"<b>🔤 Usernames</b>")
+        summary_parts.append(f"  Bought for    <b>${u_only_usd_hist:,.0f}</b>  ({u_only_ton:.0f} TON)")
+        summary_parts.append(f"  Current value <b>${u_only_usd_now:,.0f}</b>\n")
+
+    if phone_result:
+        summary_parts.append(f"<b>📱 Anonymous Number</b>")
+        summary_parts.append(f"  +{he(phone_result['phone'])}")
+        summary_parts.append(f"  Bought for    <b>${phone_result['usd_hist']:,.0f}</b>  ({phone_result['ton']:.0f} TON)")
+        summary_parts.append(f"  Current value <b>${phone_result['usd_now']:,.0f}</b>\n")
+
+    if not u_results and not phone_result:
+        summary_parts.append(f"<b>🔤 Usernames &amp; Numbers</b>")
+        summary_parts.append(f"  None\n")
+
+    summary_parts.append(f"<b>🎁 Gifts  (floor price)</b>")
+    summary_parts.append(f"  <b>{total_g_floor_ton:.1f} TON  ·  ${total_g_floor_usd:,.0f}</b>\n")
+    summary_parts.append(f"━━━━━━━━━━━━━━━━")
+    summary_parts.append(f"💰 <b>Total  {total_ton_all:.1f} TON  ·  ${total_by_floor:,.0f}</b>\n")
+    summary_parts.append(f"<i>1 TON = ${ton_now:.2f}</i>")
+
+    summary = "\n".join(summary_parts)
 
     return msg_usernames, msg_collectibles, msg_regulars, summary, result_kb(username)
 
