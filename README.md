@@ -1,4 +1,4 @@
-````markdown
+
 # tg-profile-valuator
 
 A Telegram bot that calculates the total value of any Telegram account — collectible usernames, unique gifts, floor prices, and historical TON data.
@@ -105,4 +105,4 @@ tg-profile-valuator/
 - Using a userbot technically violates Telegram's ToS. For low-volume personal use the risk is minimal, but be aware.
 - Never share or commit your `.env` file or `.session` file.
 - Historical gift value data requires `GetUniqueStarGiftValueInfoRequest` which is a Telegram internal API method — may change without notice.
-````
+
